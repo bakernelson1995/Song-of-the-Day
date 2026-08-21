@@ -1,0 +1,15 @@
+# Copy this file to .env.local and fill in real values.
+# .env.local is already git-ignored — never commit real keys.
+
+# From Firebase console → Project settings → your web app's config
+VITE_FIREBASE_API_KEY=
+VITE_FIREBASE_AUTH_DOMAIN=
+VITE_FIREBASE_PROJECT_ID=
+VITE_FIREBASE_STORAGE_BUCKET=
+VITE_FIREBASE_SENDER_ID=
+VITE_FIREBASE_APP_ID=
+
+# From console.anthropic.com → API Keys
+# Only needed by the serverless function (api/pick-song.js) — never exposed
+# to the browser, so it does NOT need a VITE_ prefix.
+ANTHROPIC_API_KEY=
