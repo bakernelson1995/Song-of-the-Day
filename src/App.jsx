@@ -414,10 +414,23 @@ export default function App() {
     return vals.reduce((a, b) => a + b, 0) / vals.length;
   };
 
+  const today = new Date().toISOString().slice(0, 10);
+  const pickedToday = data?.picks?.find((p) => p.date === today);
+  const canRoll = !pickedToday || pickedToday.rejected;
+
+  // Today's pick is excluded from every ranking/trend/history view below —
+  // its average only appears in the main card, and only after you've rated
+  // it yourself (see MyRatingBlock). This avoids anchoring anyone's rating
+  // on a number they saw before they'd formed their own opinion.
+  const picksExcludingToday = useMemo(() => {
+    if (!data) return [];
+    return pickedToday ? data.picks.filter((p) => p.id !== pickedToday.id) : data.picks;
+  }, [data, pickedToday]);
+
   const weeklyTop = useMemo(() => {
     if (!data) return [];
     const groups = {};
-    data.picks.forEach((p) => {
+    picksExcludingToday.forEach((p) => {
       const a = avg(p.ratings);
       if (a === null) return;
       const { key, label } = getWeekInfo(p.date);
@@ -426,12 +439,12 @@ export default function App() {
       }
     });
     return Object.values(groups).sort((x, y) => (x._key < y._key ? 1 : -1));
-  }, [data]);
+  }, [data, picksExcludingToday]);
 
   const monthlyTop = useMemo(() => {
     if (!data) return [];
     const groups = {};
-    data.picks.forEach((p) => {
+    picksExcludingToday.forEach((p) => {
       const a = avg(p.ratings);
       if (a === null) return;
       const { key, label } = getMonthInfo(p.date);
@@ -440,23 +453,23 @@ export default function App() {
       }
     });
     return Object.values(groups).sort((x, y) => (x._key < y._key ? 1 : -1));
-  }, [data]);
+  }, [data, picksExcludingToday]);
 
   const bothLoved = useMemo(() => {
     if (!data) return [];
-    return data.picks
+    return picksExcludingToday
       .filter((p) => {
         const vals = p.ratings.filter((r) => r !== null && r !== undefined);
         return vals.length === data.names.length && vals.every((v) => v >= bothThreshold);
       })
       .map((p) => ({ ...p, _avg: avg(p.ratings) }))
       .sort((x, y) => y._avg - x._avg);
-  }, [data, bothThreshold]);
+  }, [data, picksExcludingToday, bothThreshold]);
 
   const genreTrends = useMemo(() => {
     if (!data) return [];
     const groups = {};
-    data.picks.forEach((p) => {
+    picksExcludingToday.forEach((p) => {
       const a = avg(p.ratings);
       if (a === null) return;
       if (!groups[p.genre]) groups[p.genre] = { total: 0, count: 0 };
@@ -466,16 +479,16 @@ export default function App() {
     return Object.entries(groups)
       .map(([genre, { total, count }]) => ({ genre, avg: total / count, count }))
       .sort((a, b) => b.avg - a.avg);
-  }, [data]);
+  }, [data, picksExcludingToday]);
 
   const powerRankings = useMemo(() => {
     if (!data) return [];
-    return data.picks
+    return picksExcludingToday
       .map((p) => ({ ...p, _avg: avg(p.ratings) }))
       .filter((p) => p._avg !== null)
       .sort((a, b) => b._avg - a._avg)
       .slice(0, 10);
-  }, [data]);
+  }, [data, picksExcludingToday]);
 
   const historyGenres = useMemo(() => {
     if (!data) return ["All"];
@@ -491,7 +504,7 @@ export default function App() {
 
   const visiblePicks = useMemo(() => {
     if (!data) return [];
-    let list = [...data.picks];
+    let list = [...picksExcludingToday];
     if (filterGenre !== "All") list = list.filter((p) => p.genre === filterGenre);
     if (minRating > 0) {
       list = list.filter((p) => {
@@ -506,11 +519,7 @@ export default function App() {
     if (sortBy === "rating-low")
       list.sort((a, b) => (avg(a.ratings) ?? 11) - (avg(b.ratings) ?? 11));
     return list;
-  }, [data, filterGenre, minRating, sortBy]);
-
-  const today = new Date().toISOString().slice(0, 10);
-  const pickedToday = data?.picks?.find((p) => p.date === today);
-  const canRoll = !pickedToday || pickedToday.rejected;
+  }, [data, picksExcludingToday, filterGenre, minRating, sortBy]);
 
   if (loading) {
     return (
@@ -1069,12 +1078,19 @@ function MyRatingBlock({ pick, names, currentUser, onRate, onPickIdentity }) {
   const vals = pick.ratings.filter((r) => r !== null && r !== undefined);
   const avgVal = vals.length ? vals.reduce((a, b) => a + b, 0) / vals.length : null;
   const myIndex = currentUser ? names.indexOf(currentUser) : -1;
+  const iHaveRated = myIndex !== -1 && pick.ratings[myIndex] !== null && pick.ratings[myIndex] !== undefined;
 
   return (
     <div style={styles.myRatingWrap}>
-      <div style={styles.aggregateLine}>
-        {avgVal === null ? "unrated so far" : `★ ${avgVal.toFixed(1)} avg`} · {vals.length}/{names.length} rated
-      </div>
+      {iHaveRated ? (
+        <div style={styles.aggregateLine}>
+          {avgVal === null ? "unrated so far" : `★ ${avgVal.toFixed(1)} avg`} · {vals.length}/{names.length} rated
+        </div>
+      ) : (
+        <div style={styles.aggregateHiddenLine}>
+          Rate this song to see how everyone else rated it
+        </div>
+      )}
       {myIndex === -1 ? (
         <button style={styles.linkBtn} onClick={onPickIdentity}>
           select your name to rate this song
@@ -1531,6 +1547,7 @@ const styles = {
   ratingRowHighlight: {},
   myRatingWrap: { display: "flex", flexDirection: "column", gap: 8, marginTop: 8 },
   aggregateLine: { fontSize: 13, fontWeight: 600, color: COLORS.yellow },
+  aggregateHiddenLine: { fontSize: 13, fontStyle: "italic", color: COLORS.chalkDim },
   ratingItem: { display: "flex", alignItems: "center", gap: 8 },
   ratingLabel: { fontSize: 13, color: COLORS.chalk, fontWeight: 600, minWidth: 0 },
   ratingLabelCard: { fontSize: 12, color: "#3a3320", fontWeight: 700, minWidth: 0 },
