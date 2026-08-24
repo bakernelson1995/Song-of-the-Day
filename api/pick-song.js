@@ -6,11 +6,15 @@ export default async function handler(req, res) {
     return res.status(405).json({ error: "Method not allowed" });
   }
 
-  const { genre, exclude } = req.body || {};
+  const { genre, exclude, yearFilter } = req.body || {};
 
   if (!genre) {
     return res.status(400).json({ error: "Missing genre" });
   }
+
+  const yearRule = yearFilter
+    ? "(5) The song must have been originally released in 1982 or later — do not suggest anything released before 1982. "
+    : "";
 
   try {
     const response = await fetch("https://api.anthropic.com/v1/messages", {
@@ -29,6 +33,7 @@ export default async function handler(req, res) {
           "(2) It should be relatively lesser-known — avoid current top-40 chart hits and the most overplayed classics. " +
           "(3) It must be fully classroom-appropriate: no profanity, sexual content, drug references, violence, or explicit themes, in the title, artist name, or (to the best of your knowledge) the lyrics/content. " +
           "(4) Do not repeat any song in the exclude list. " +
+          yearRule +
           "Respond with ONLY raw JSON, no markdown, no code fences, no commentary, in exactly this shape: " +
           '{"title": string, "artist": string, "genre": string, "reason": string (one short sentence on why it fits a classroom)}',
         messages: [

@@ -101,7 +101,7 @@ function getMonthInfo(dateStr) {
 }
 
 function defaultData() {
-  return { names: ["Mr. Baker", "Mr. Sauve"], picks: [] };
+  return { names: ["Mr. Baker", "Mr. Sauve"], picks: [], yearFilterEnabled: true };
 }
 
 export default function App() {
@@ -205,6 +205,7 @@ export default function App() {
         body: JSON.stringify({
           genre: rolledGenre,
           exclude: recentList,
+          yearFilter: data.yearFilterEnabled !== false,
         }),
       });
 
@@ -652,6 +653,14 @@ export default function App() {
                 </button>
               </div>
             </div>
+            <label style={styles.checkboxRow}>
+              <input
+                type="checkbox"
+                checked={data.yearFilterEnabled !== false}
+                onChange={(e) => save({ ...data, yearFilterEnabled: e.target.checked })}
+              />
+              <span>Only suggest songs released 1982–present</span>
+            </label>
           </div>
         )}
 
