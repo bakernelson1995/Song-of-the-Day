@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useMemo, useCallback } from "react";
-import { loadData, saveData, subscribeToData } from "./firebase";
+import { loadData, saveData, subscribeToData, watchAuth, signUp, signIn, signOutUser } from "./firebase";
 
 // ---------- Fallback pool: used only if the live AI suggestion request fails ----------
 const FALLBACK_POOL = [
@@ -81,6 +81,17 @@ function containsFlaggedWord(str) {
   return FLAG_WORDS.some((w) => new RegExp(`\\b${w}\\b`, "i").test(lower));
 }
 
+function friendlyAuthError(e) {
+  const code = e && e.code ? e.code : "";
+  if (code.includes("email-already-in-use")) return "That email is already registered — try signing in instead.";
+  if (code.includes("invalid-email")) return "That email address doesn't look right.";
+  if (code.includes("weak-password")) return "Password needs to be at least 6 characters.";
+  if (code.includes("user-not-found") || code.includes("wrong-password") || code.includes("invalid-credential"))
+    return "Email or password didn't match — try again.";
+  if (code.includes("too-many-requests")) return "Too many attempts — wait a bit and try again.";
+  return "Something went wrong — please try again.";
+}
+
 function getWeekInfo(dateStr) {
   const d = new Date(dateStr + "T00:00:00");
   const day = d.getDay();
@@ -101,7 +112,7 @@ function getMonthInfo(dateStr) {
 }
 
 function defaultData() {
-  return { names: ["Mr. Baker", "Mr. Sauve"], picks: [], yearFilterEnabled: true };
+  return { teachers: {}, picks: [], yearFilterEnabled: true };
 }
 
 export default function App() {
@@ -114,49 +125,84 @@ export default function App() {
   const [minRating, setMinRating] = useState(0);
   const [sortBy, setSortBy] = useState("recent");
   const [showAdd, setShowAdd] = useState(false);
-  const [showSettings, setShowSettings] = useState(false);
   const [showImport, setShowImport] = useState(false);
   const [importText, setImportText] = useState("");
   const [importMsg, setImportMsg] = useState(null);
   const [newSong, setNewSong] = useState({ title: "", artist: "", genre: "Instrumental", previewed: false });
   const [justPicked, setJustPicked] = useState(null);
-  const [newTeacherName, setNewTeacherName] = useState("");
   const [picking, setPicking] = useState(false);
   const [pickError, setPickError] = useState(null);
   const [insightsTab, setInsightsTab] = useState("weekly");
   const [bothThreshold, setBothThreshold] = useState(8);
-  const [currentUser, setCurrentUser] = useState(null);
-  const [identityLoaded, setIdentityLoaded] = useState(false);
-  const [identitySearch, setIdentitySearch] = useState("");
-  const [showIdentityPicker, setShowIdentityPicker] = useState(false);
+
+  // ---------- Real accounts ----------
+  const [authUser, setAuthUser] = useState(null);
+  const [authLoading, setAuthLoading] = useState(true);
+  const [authMode, setAuthMode] = useState("signin"); // "signin" | "signup"
+  const [authForm, setAuthForm] = useState({ name: "", email: "", password: "" });
+  const [authError, setAuthError] = useState(null);
+  const [authBusy, setAuthBusy] = useState(false);
+  const [showInvitePrompt, setShowInvitePrompt] = useState(false);
+  const [showAccountSettings, setShowAccountSettings] = useState(false);
+  const [myNameEdit, setMyNameEdit] = useState("");
+  const [inviteCopied, setInviteCopied] = useState(false);
 
   useEffect(() => {
-    try {
-      const saved = localStorage.getItem("my-identity");
-      if (saved) setCurrentUser(saved);
-    } catch {
-      // no saved identity yet — that's fine
-    } finally {
-      setIdentityLoaded(true);
-    }
+    const unsubscribe = watchAuth((user) => {
+      setAuthUser(user);
+      setAuthLoading(false);
+    });
+    return () => unsubscribe();
   }, []);
 
-  const chooseIdentity = (name) => {
-    setCurrentUser(name);
-    setShowIdentityPicker(false);
-    setIdentitySearch("");
+  const myName = authUser
+    ? (data && data.teachers && data.teachers[authUser.uid]) || authUser.displayName || authUser.email
+    : null;
+
+  const handleSignUp = async () => {
+    setAuthError(null);
+    if (!authForm.name.trim() || !authForm.email.trim() || !authForm.password) {
+      setAuthError("Please fill in your name, email, and password.");
+      return;
+    }
+    setAuthBusy(true);
     try {
-      localStorage.setItem("my-identity", name);
-    } catch {
-      // if this fails, the pick still works for the current session
+      await signUp(authForm.email.trim(), authForm.password, authForm.name.trim());
+      setShowInvitePrompt(true);
+    } catch (e) {
+      setAuthError(friendlyAuthError(e));
+    } finally {
+      setAuthBusy(false);
     }
   };
 
-  useEffect(() => {
-    if (data && currentUser && !data.names.includes(currentUser)) {
-      setCurrentUser(null);
+  const handleSignIn = async () => {
+    setAuthError(null);
+    if (!authForm.email.trim() || !authForm.password) {
+      setAuthError("Please enter your email and password.");
+      return;
     }
-  }, [data, currentUser]);
+    setAuthBusy(true);
+    try {
+      await signIn(authForm.email.trim(), authForm.password);
+    } catch (e) {
+      setAuthError(friendlyAuthError(e));
+    } finally {
+      setAuthBusy(false);
+    }
+  };
+
+  const handleSignOut = async () => {
+    await signOutUser();
+    setShowAccountSettings(false);
+  };
+
+  const saveMyName = async () => {
+    const name = myNameEdit.trim();
+    if (!name || !authUser || !data) return;
+    await save({ ...data, teachers: { ...(data.teachers || {}), [authUser.uid]: name } });
+    setShowAccountSettings(false);
+  };
 
   useEffect(() => {
     const unsubscribe = subscribeToData(
@@ -231,7 +277,7 @@ export default function App() {
         genre: suggestion.genre || rolledGenre,
         reason: suggestion.reason || "",
         date: new Date().toISOString().slice(0, 10),
-        ratings: data.names.map(() => null),
+        ratings: {},
         source: "ai",
         previewed: false,
         flagged,
@@ -257,7 +303,7 @@ export default function App() {
         artist: choice.artist,
         genre: choice.genre,
         date: new Date().toISOString().slice(0, 10),
-        ratings: data.names.map(() => null),
+        ratings: {},
         source: "pool-fallback",
         previewed: false,
         flagged: false,
@@ -279,7 +325,7 @@ export default function App() {
       artist: newSong.artist.trim(),
       genre: newSong.genre,
       date: new Date().toISOString().slice(0, 10),
-      ratings: data.names.map(() => null),
+      ratings: {},
       custom: true,
       previewed: true,
       flagged,
@@ -290,41 +336,19 @@ export default function App() {
     setShowAdd(false);
   };
 
-  const rate = (pickId, personIdx, value) => {
+  const rate = (pickId, uid, value) => {
     const v = value === "" ? null : Math.max(0, Math.min(10, Number(value)));
     const picks = data.picks.map((p) => {
       if (p.id !== pickId) return p;
-      const ratings = [...p.ratings];
-      while (ratings.length <= personIdx) ratings.push(null);
-      ratings[personIdx] = v;
+      const ratings = { ...p.ratings };
+      if (v === null) {
+        delete ratings[uid];
+      } else {
+        ratings[uid] = v;
+      }
       return { ...p, ratings };
     });
     save({ ...data, picks });
-  };
-
-  const renameTeacher = (idx, val) => {
-    const names = [...data.names];
-    names[idx] = val;
-    save({ ...data, names });
-  };
-
-  const addTeacher = () => {
-    const name = newTeacherName.trim();
-    if (!name) return;
-    const names = [...data.names, name];
-    const picks = data.picks.map((p) => ({ ...p, ratings: [...p.ratings, null] }));
-    save({ ...data, names, picks });
-    setNewTeacherName("");
-  };
-
-  const removeTeacher = (idx) => {
-    if (data.names.length <= 2) return; // keep at least 2 teachers
-    const names = data.names.filter((_, i) => i !== idx);
-    const picks = data.picks.map((p) => ({
-      ...p,
-      ratings: p.ratings.filter((_, i) => i !== idx),
-    }));
-    save({ ...data, names, picks });
   };
 
   const markPreviewed = (pickId) => {
@@ -374,9 +398,12 @@ export default function App() {
       existingKeys.add(key);
 
       const ratingsSource = item.ratings || {};
-      const ratings = data.names.map((n) =>
-        ratingsSource[n] !== undefined && ratingsSource[n] !== null ? Number(ratingsSource[n]) : null
-      );
+      const ratings = {};
+      Object.keys(ratingsSource).forEach((k) => {
+        if (ratingsSource[k] !== undefined && ratingsSource[k] !== null) {
+          ratings[k] = Number(ratingsSource[k]);
+        }
+      });
 
       newPicks.push({
         id: uid(),
@@ -409,7 +436,7 @@ export default function App() {
   };
 
   const avg = (ratings) => {
-    const vals = ratings.filter((r) => r !== null && r !== undefined);
+    const vals = Object.values(ratings || {}).filter((r) => r !== null && r !== undefined);
     if (vals.length === 0) return null;
     return vals.reduce((a, b) => a + b, 0) / vals.length;
   };
@@ -459,8 +486,11 @@ export default function App() {
     if (!data) return [];
     return picksExcludingToday
       .filter((p) => {
-        const vals = p.ratings.filter((r) => r !== null && r !== undefined);
-        return vals.length === data.names.length && vals.every((v) => v >= bothThreshold);
+        const vals = Object.values(p.ratings || {}).filter((r) => r !== null && r !== undefined);
+        // "Everyone who rated it agreed" rather than literally every registered
+        // teacher — requiring universal participation stops being meaningful
+        // once dozens or hundreds of people can sign up.
+        return vals.length >= 2 && vals.every((v) => v >= bothThreshold);
       })
       .map((p) => ({ ...p, _avg: avg(p.ratings) }))
       .sort((x, y) => y._avg - x._avg);
@@ -495,13 +525,6 @@ export default function App() {
     return ["All", ...Array.from(new Set(data.picks.map((p) => p.genre))).sort()];
   }, [data]);
 
-  const identityMatches = useMemo(() => {
-    if (!data) return [];
-    const q = identitySearch.trim().toLowerCase();
-    if (!q) return data.names;
-    return data.names.filter((n) => n.toLowerCase().includes(q));
-  }, [data, identitySearch]);
-
   const visiblePicks = useMemo(() => {
     if (!data) return [];
     let list = [...picksExcludingToday];
@@ -521,7 +544,7 @@ export default function App() {
     return list;
   }, [data, picksExcludingToday, filterGenre, minRating, sortBy]);
 
-  if (loading) {
+  if (loading || authLoading) {
     return (
       <div style={styles.wrap}>
         <FontImport />
@@ -530,73 +553,96 @@ export default function App() {
     );
   }
 
+  if (!authUser) {
+    return (
+      <div style={styles.wrap}>
+        <FontImport />
+        <AuthScreen
+          mode={authMode}
+          setMode={setAuthMode}
+          form={authForm}
+          setForm={setAuthForm}
+          error={authError}
+          busy={authBusy}
+          onSignUp={handleSignUp}
+          onSignIn={handleSignIn}
+        />
+      </div>
+    );
+  }
+
   return (
     <div style={styles.wrap}>
       <FontImport />
+      {showInvitePrompt && (
+        <InvitePrompt
+          inviteCopied={inviteCopied}
+          onCopy={() => {
+            navigator.clipboard
+              .writeText(window.location.href)
+              .then(() => setInviteCopied(true))
+              .catch(() => {});
+          }}
+          onClose={() => {
+            setShowInvitePrompt(false);
+            setInviteCopied(false);
+          }}
+        />
+      )}
       <div style={styles.board}>
         <header style={styles.header}>
           <div>
             <h1 style={styles.title}>Song of the Day</h1>
-            <p style={styles.subtitle}>
-              {data.names.length === 2
-                ? `${data.names[0]} & ${data.names[1]}'s shared classroom playlist`
-                : `${data.names.slice(0, -1).join(", ")} & ${data.names[data.names.length - 1]}'s shared classroom playlist`}
-            </p>
+            <p style={styles.subtitle}>Mr. Baker, Mr. Sauve &amp; Mr. Otte's shared classroom playlist</p>
           </div>
           <div style={{ display: "flex", gap: 8 }}>
             <button style={styles.ghostBtn} onClick={() => setShowImport((s) => !s)}>
               {showImport ? "close" : "import ⇪"}
             </button>
-            <button style={styles.ghostBtn} onClick={() => setShowSettings((s) => !s)}>
-              {showSettings ? "close" : "names ✎"}
+            <button
+              style={styles.ghostBtn}
+              onClick={() => {
+                setMyNameEdit(myName || "");
+                setShowAccountSettings((s) => !s);
+              }}
+            >
+              {showAccountSettings ? "close" : "account ⚙"}
             </button>
           </div>
         </header>
 
-        {/* ---------- Identity: who am I, remembered for this browser/account ---------- */}
+        {/* ---------- Account bar ---------- */}
         <div style={styles.identityBar}>
-          {currentUser ? (
-            <>
-              <span style={styles.identityText}>
-                Rating as <strong>{currentUser}</strong>
-              </span>
-              <button style={styles.linkBtn} onClick={() => setShowIdentityPicker((s) => !s)}>
-                {showIdentityPicker ? "cancel" : "not you? change"}
-              </button>
-            </>
-          ) : (
-            <>
-              <span style={styles.identityText}>Who's rating?</span>
-              <button style={styles.primaryBtnSmall} onClick={() => setShowIdentityPicker(true)}>
-                Select your name
-              </button>
-            </>
-          )}
+          <span style={styles.identityText}>
+            Signed in as <strong>{myName}</strong>
+          </span>
+          <button style={styles.linkBtn} onClick={handleSignOut}>
+            sign out
+          </button>
         </div>
 
-        {showIdentityPicker && (
+        {showAccountSettings && (
           <div style={styles.settingsCard}>
             <div style={{ display: "flex", flexDirection: "column", gap: 8, width: "100%" }}>
-              <input
-                autoFocus
-                style={styles.textInput}
-                placeholder="Type to search your name…"
-                value={identitySearch}
-                onChange={(e) => setIdentitySearch(e.target.value)}
-              />
-              <div style={styles.identityResultsList}>
-                {identityMatches.length === 0 ? (
-                  <div style={styles.smallLabel}>
-                    No match — check spelling, or ask a teacher to add your name in settings.
-                  </div>
-                ) : (
-                  identityMatches.map((n) => (
-                    <button key={n} style={styles.identityResultBtn} onClick={() => chooseIdentity(n)}>
-                      {n}
-                    </button>
-                  ))
-                )}
+              <span style={styles.settingsLabel}>Your display name</span>
+              <div style={{ display: "flex", gap: 6 }}>
+                <input
+                  style={styles.textInput}
+                  value={myNameEdit}
+                  onChange={(e) => setMyNameEdit(e.target.value)}
+                />
+                <button style={styles.primaryBtnSmall} onClick={saveMyName}>
+                  Save
+                </button>
               </div>
+              <label style={styles.checkboxRow}>
+                <input
+                  type="checkbox"
+                  checked={data.yearFilterEnabled !== false}
+                  onChange={(e) => save({ ...data, yearFilterEnabled: e.target.checked })}
+                />
+                <span>Only suggest songs released 1982–present</span>
+              </label>
             </div>
           </div>
         )}
@@ -605,13 +651,13 @@ export default function App() {
           <div style={styles.settingsCard}>
             <div style={{ display: "flex", flexDirection: "column", gap: 8, width: "100%" }}>
               <span style={styles.settingsLabel}>
-                Paste historical picks as a JSON array. Each teacher's rating is matched by name —
-                use the exact names shown above ({data.names.join(", ")}). Skips exact duplicates
-                automatically.
+                Paste historical picks as a JSON array. Each teacher's rating is keyed by whatever
+                name you give it in the JSON — it doesn't need to match a real account. Skips exact
+                duplicates automatically.
               </span>
               <textarea
                 style={styles.importTextarea}
-                placeholder={`[\n  {"title": "Song Title", "artist": "Artist Name", "date": "2025-09-03", "genre": "Indie/Folk", "ratings": {"${data.names[0]}": 8, "${data.names[1]}": 9}}\n]`}
+                placeholder={`[\n  {"title": "Song Title", "artist": "Artist Name", "date": "2025-09-03", "genre": "Indie/Folk", "ratings": {"Mr. Baker": 8, "Mr. Sauve": 9}}\n]`}
                 value={importText}
                 onChange={(e) => setImportText(e.target.value)}
                 rows={6}
@@ -621,55 +667,6 @@ export default function App() {
               </button>
               {importMsg && <div style={styles.smallLabel}>{importMsg}</div>}
             </div>
-          </div>
-        )}
-
-        {showSettings && (
-          <div style={styles.settingsCard}>
-            {data.names.map((name, i) => (
-              <div key={i} style={styles.settingsRow}>
-                <span style={styles.settingsLabel}>Teacher {i + 1}</span>
-                <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
-                  <input
-                    style={styles.textInput}
-                    value={name}
-                    onChange={(e) => renameTeacher(i, e.target.value)}
-                  />
-                  {data.names.length > 2 && (
-                    <button
-                      style={styles.deleteBtnPlain}
-                      title="Remove teacher"
-                      onClick={() => removeTeacher(i)}
-                    >
-                      ×
-                    </button>
-                  )}
-                </div>
-              </div>
-            ))}
-            <div style={styles.settingsRow}>
-              <span style={styles.settingsLabel}>Add a teacher</span>
-              <div style={{ display: "flex", gap: 6 }}>
-                <input
-                  style={styles.textInput}
-                  placeholder="Name"
-                  value={newTeacherName}
-                  onChange={(e) => setNewTeacherName(e.target.value)}
-                  onKeyDown={(e) => e.key === "Enter" && addTeacher()}
-                />
-                <button style={styles.primaryBtnSmall} onClick={addTeacher}>
-                  Add
-                </button>
-              </div>
-            </div>
-            <label style={styles.checkboxRow}>
-              <input
-                type="checkbox"
-                checked={data.yearFilterEnabled !== false}
-                onChange={(e) => save({ ...data, yearFilterEnabled: e.target.checked })}
-              />
-              <span>Only suggest songs released 1982–present</span>
-            </label>
           </div>
         )}
 
@@ -822,13 +819,7 @@ export default function App() {
                     <span style={styles.rerollHint}>Dice unlocked — roll again above.</span>
                   )}
                 </div>
-                <MyRatingBlock
-                  pick={pickedToday}
-                  names={data.names}
-                  currentUser={currentUser}
-                  onRate={rate}
-                  onPickIdentity={() => setShowIdentityPicker(true)}
-                />
+                <MyRatingBlock pick={pickedToday} myUid={authUser.uid} myName={myName} onRate={rate} />
               </>
             )}
           </div>
@@ -1036,7 +1027,7 @@ export default function App() {
                     <div style={styles.avgBadge}>
                       {a === null
                         ? "unrated"
-                        : `★ ${a.toFixed(1)} avg · ${p.ratings.filter((r) => r !== null && r !== undefined).length}/${data.names.length} rated`}
+                        : `★ ${a.toFixed(1)} avg · ${Object.values(p.ratings || {}).filter((r) => r !== null && r !== undefined).length} ratings`}
                     </div>
                   </div>
                 );
@@ -1074,43 +1065,116 @@ function AppropriatenessBadge({ pick, card }) {
   return <span style={style}>{label}</span>;
 }
 
-function MyRatingBlock({ pick, names, currentUser, onRate, onPickIdentity }) {
-  const vals = pick.ratings.filter((r) => r !== null && r !== undefined);
+function MyRatingBlock({ pick, myUid, myName, onRate }) {
+  const vals = Object.values(pick.ratings || {}).filter((r) => r !== null && r !== undefined);
   const avgVal = vals.length ? vals.reduce((a, b) => a + b, 0) / vals.length : null;
-  const myIndex = currentUser ? names.indexOf(currentUser) : -1;
-  const iHaveRated = myIndex !== -1 && pick.ratings[myIndex] !== null && pick.ratings[myIndex] !== undefined;
+  const iHaveRated = pick.ratings && pick.ratings[myUid] !== null && pick.ratings[myUid] !== undefined;
 
   return (
     <div style={styles.myRatingWrap}>
       {iHaveRated ? (
         <div style={styles.aggregateLine}>
-          {avgVal === null ? "unrated so far" : `★ ${avgVal.toFixed(1)} avg`} · {vals.length}/{names.length} rated
+          {avgVal === null ? "unrated so far" : `★ ${avgVal.toFixed(1)} avg`} · {vals.length}{" "}
+          {vals.length === 1 ? "rating" : "ratings"}
         </div>
       ) : (
-        <div style={styles.aggregateHiddenLine}>
-          Rate this song to see how everyone else rated it
-        </div>
+        <div style={styles.aggregateHiddenLine}>Rate this song to see how everyone else rated it</div>
       )}
-      {myIndex === -1 ? (
-        <button style={styles.linkBtn} onClick={onPickIdentity}>
-          select your name to rate this song
-        </button>
-      ) : (
-        <div style={styles.ratingItem}>
-          <span style={styles.ratingLabel}>Your rating ({currentUser})</span>
+      <div style={styles.ratingItem}>
+        <span style={styles.ratingLabel}>Your rating ({myName})</span>
+        <input
+          type="number"
+          min="0"
+          max="10"
+          step="1"
+          placeholder="–"
+          value={pick.ratings && pick.ratings[myUid] !== undefined ? pick.ratings[myUid] : ""}
+          onChange={(e) => onRate(pick.id, myUid, e.target.value)}
+          style={styles.ratingInput}
+        />
+        <span style={styles.ratingOutOf}>/10</span>
+      </div>
+    </div>
+  );
+}
+
+function AuthScreen({ mode, setMode, form, setForm, error, busy, onSignUp, onSignIn }) {
+  const isSignUp = mode === "signup";
+  const submit = () => (isSignUp ? onSignUp() : onSignIn());
+
+  return (
+    <div style={styles.authWrap}>
+      <div style={styles.authCard}>
+        <h1 style={styles.authTitle}>Song of the Day</h1>
+        <p style={styles.subtitle}>Mr. Baker, Mr. Sauve &amp; Mr. Otte's shared classroom playlist</p>
+
+        <div style={styles.tabBar}>
+          <button
+            style={mode === "signin" ? styles.tabBtnActive : styles.tabBtn}
+            onClick={() => setMode("signin")}
+          >
+            Sign in
+          </button>
+          <button
+            style={mode === "signup" ? styles.tabBtnActive : styles.tabBtn}
+            onClick={() => setMode("signup")}
+          >
+            Create account
+          </button>
+        </div>
+
+        <div style={styles.authForm}>
+          {isSignUp && (
+            <input
+              style={styles.textInput}
+              placeholder="Your name (e.g. Mr. Otte)"
+              value={form.name}
+              onChange={(e) => setForm({ ...form, name: e.target.value })}
+            />
+          )}
           <input
-            type="number"
-            min="0"
-            max="10"
-            step="1"
-            placeholder="–"
-            value={pick.ratings[myIndex] ?? ""}
-            onChange={(e) => onRate(pick.id, myIndex, e.target.value)}
-            style={styles.ratingInput}
+            style={styles.textInput}
+            type="email"
+            placeholder="Email"
+            value={form.email}
+            onChange={(e) => setForm({ ...form, email: e.target.value })}
           />
-          <span style={styles.ratingOutOf}>/10</span>
+          <input
+            style={styles.textInput}
+            type="password"
+            placeholder="Password"
+            value={form.password}
+            onChange={(e) => setForm({ ...form, password: e.target.value })}
+            onKeyDown={(e) => e.key === "Enter" && submit()}
+          />
+          {error && <div style={styles.warningBox}>{error}</div>}
+          <button style={styles.primaryBtn} onClick={submit} disabled={busy}>
+            {busy ? "Please wait…" : isSignUp ? "Create account" : "Sign in"}
+          </button>
         </div>
-      )}
+      </div>
+    </div>
+  );
+}
+
+function InvitePrompt({ inviteCopied, onCopy, onClose }) {
+  return (
+    <div style={styles.modalOverlay}>
+      <div style={styles.modalCard}>
+        <h2 style={styles.powerTitle}>🎉 You're in!</h2>
+        <p style={styles.identityText}>
+          This gets more fun with more teachers. Invite a few others by sharing this link:
+        </p>
+        <div style={styles.inviteLinkBox}>{typeof window !== "undefined" ? window.location.href : ""}</div>
+        <div style={{ display: "flex", gap: 8, marginTop: 10 }}>
+          <button style={styles.primaryBtnSmall} onClick={onCopy}>
+            {inviteCopied ? "Copied!" : "Copy link"}
+          </button>
+          <button style={styles.ghostBtn} onClick={onClose}>
+            Maybe later
+          </button>
+        </div>
+      </div>
     </div>
   );
 }
@@ -1152,6 +1216,60 @@ const styles = {
     fontSize: 28,
     color: COLORS.chalk,
     paddingTop: 80,
+  },
+  authWrap: {
+    minHeight: "100vh",
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "center",
+    padding: 20,
+  },
+  authCard: {
+    width: "100%",
+    maxWidth: 400,
+    background: COLORS.bgAlt,
+    border: `1px solid ${COLORS.line}`,
+    borderRadius: 20,
+    padding: "28px 26px",
+    textAlign: "center",
+  },
+  authTitle: {
+    fontFamily: "'Caveat', cursive",
+    fontWeight: 700,
+    fontSize: 44,
+    margin: 0,
+    color: COLORS.yellow,
+    lineHeight: 1,
+  },
+  authForm: { display: "flex", flexDirection: "column", gap: 10, marginTop: 18, textAlign: "left" },
+  modalOverlay: {
+    position: "fixed",
+    inset: 0,
+    background: "rgba(0,0,0,0.6)",
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "center",
+    zIndex: 50,
+    padding: 20,
+  },
+  modalCard: {
+    width: "100%",
+    maxWidth: 420,
+    background: COLORS.bgAlt,
+    border: `1px solid ${COLORS.yellow}`,
+    borderRadius: 20,
+    padding: "24px 26px",
+  },
+  inviteLinkBox: {
+    marginTop: 12,
+    background: COLORS.bg,
+    border: `1px solid ${COLORS.line}`,
+    borderRadius: 8,
+    padding: "10px 12px",
+    fontFamily: "'JetBrains Mono', monospace",
+    fontSize: 12,
+    color: COLORS.chalkDim,
+    wordBreak: "break-all",
   },
   board: { maxWidth: 780, margin: "0 auto" },
   header: {

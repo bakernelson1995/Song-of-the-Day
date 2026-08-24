@@ -1,5 +1,13 @@
 import { initializeApp } from "firebase/app";
 import { getFirestore, doc, getDoc, setDoc, onSnapshot } from "firebase/firestore";
+import {
+  getAuth,
+  onAuthStateChanged,
+  createUserWithEmailAndPassword,
+  signInWithEmailAndPassword,
+  signOut as firebaseSignOut,
+  updateProfile,
+} from "firebase/auth";
 
 const firebaseConfig = {
   apiKey: import.meta.env.VITE_FIREBASE_API_KEY,
@@ -12,8 +20,12 @@ const firebaseConfig = {
 
 const app = initializeApp(firebaseConfig);
 export const db = getFirestore(app);
+export const auth = getAuth(app);
 
-// One shared document holds { names, picks } — same shape the artifact used.
+// One shared document holds { picks, teachers }.
+// `teachers` maps each signed-in person's account id -> the display name
+// they chose at sign-up, so ratings can be tied to a real account instead
+// of a name anyone could pick off a list.
 export const dataRef = doc(db, "song-of-the-day", "shared");
 
 export async function loadData() {
@@ -22,11 +34,11 @@ export async function loadData() {
 }
 
 export async function saveData(data) {
-  await setDoc(dataRef, data);
+  await setDoc(dataRef, data, { merge: true });
 }
 
 // Real-time listener — every teacher's screen updates live when anyone else
-// picks a song, rates one, or edits settings. onErr fires on read failures
+// picks a song, rates one, or signs up. onErr fires on read failures
 // (e.g. offline, or Firestore rules rejecting the read).
 export function subscribeToData(onData, onErr) {
   return onSnapshot(
@@ -39,4 +51,33 @@ export function subscribeToData(onData, onErr) {
       if (onErr) onErr(err);
     }
   );
+}
+
+// Registers/updates just this one person's name in the shared teachers map,
+// using a targeted field update rather than rewriting the whole document —
+// this avoids clobbering someone else's simultaneous sign-up.
+export async function registerTeacherName(uid, name) {
+  await setDoc(dataRef, { teachers: { [uid]: name } }, { merge: true });
+}
+
+// ---------- Auth ----------
+
+export function watchAuth(callback) {
+  return onAuthStateChanged(auth, callback);
+}
+
+export async function signUp(email, password, displayName) {
+  const cred = await createUserWithEmailAndPassword(auth, email, password);
+  await updateProfile(cred.user, { displayName });
+  await registerTeacherName(cred.user.uid, displayName);
+  return cred.user;
+}
+
+export async function signIn(email, password) {
+  const cred = await signInWithEmailAndPassword(auth, email, password);
+  return cred.user;
+}
+
+export async function signOutUser() {
+  await firebaseSignOut(auth);
 }
