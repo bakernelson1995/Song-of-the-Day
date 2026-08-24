@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useMemo, useCallback } from "react";
-import { loadData, saveData, subscribeToData, watchAuth, signUp, signIn, signOutUser } from "./firebase";
+import { loadData, saveData, subscribeToData, watchAuth, signUp, signIn, signOutUser, registerTeacher } from "./firebase";
 
 // ---------- Fallback pool: used only if the live AI suggestion request fails ----------
 const FALLBACK_POOL = [
@@ -147,6 +147,36 @@ export default function App() {
   const [myNameEdit, setMyNameEdit] = useState("");
   const [inviteCopied, setInviteCopied] = useState(false);
 
+  // Whoever's link was clicked to get here — captured once on load, used to
+  // credit the inviter if this visitor signs up.
+  const [referrerUid] = useState(() => {
+    try {
+      return new URLSearchParams(window.location.search).get("ref") || null;
+    } catch {
+      return null;
+    }
+  });
+
+  // ---------- Admin ----------
+  const ADMIN_CODE = "ADMIN1234";
+  const [isAdmin, setIsAdmin] = useState(false);
+  const [showAdminGate, setShowAdminGate] = useState(false);
+  const [showAdminPanel, setShowAdminPanel] = useState(false);
+  const [adminCodeInput, setAdminCodeInput] = useState("");
+  const [adminError, setAdminError] = useState(null);
+
+  const submitAdminCode = () => {
+    if (adminCodeInput === ADMIN_CODE) {
+      setIsAdmin(true);
+      setShowAdminGate(false);
+      setShowAdminPanel(true);
+      setAdminCodeInput("");
+      setAdminError(null);
+    } else {
+      setAdminError("That code isn't right.");
+    }
+  };
+
   useEffect(() => {
     const unsubscribe = watchAuth((user) => {
       setAuthUser(user);
@@ -155,8 +185,9 @@ export default function App() {
     return () => unsubscribe();
   }, []);
 
+  const myTeacherEntry = authUser && data && data.teachers ? data.teachers[authUser.uid] : null;
   const myName = authUser
-    ? (data && data.teachers && data.teachers[authUser.uid]) || authUser.displayName || authUser.email
+    ? (myTeacherEntry && myTeacherEntry.name) || authUser.displayName || authUser.email
     : null;
 
   const handleSignUp = async () => {
@@ -167,7 +198,7 @@ export default function App() {
     }
     setAuthBusy(true);
     try {
-      await signUp(authForm.email.trim(), authForm.password, authForm.name.trim());
+      await signUp(authForm.email.trim(), authForm.password, authForm.name.trim(), referrerUid);
       setShowInvitePrompt(true);
     } catch (e) {
       setAuthError(friendlyAuthError(e));
@@ -199,8 +230,11 @@ export default function App() {
 
   const saveMyName = async () => {
     const name = myNameEdit.trim();
-    if (!name || !authUser || !data) return;
-    await save({ ...data, teachers: { ...(data.teachers || {}), [authUser.uid]: name } });
+    if (!name || !authUser) return;
+    await registerTeacher(authUser.uid, {
+      ...(myTeacherEntry || {}),
+      name,
+    });
     setShowAccountSettings(false);
   };
 
@@ -574,12 +608,16 @@ export default function App() {
   return (
     <div style={styles.wrap}>
       <FontImport />
+      {showAdminPanel && isAdmin && (
+        <AdminPanel data={data} onClose={() => setShowAdminPanel(false)} />
+      )}
       {showInvitePrompt && (
         <InvitePrompt
+          inviteLink={`${window.location.origin}${window.location.pathname}?ref=${authUser.uid}`}
           inviteCopied={inviteCopied}
           onCopy={() => {
             navigator.clipboard
-              .writeText(window.location.href)
+              .writeText(`${window.location.origin}${window.location.pathname}?ref=${authUser.uid}`)
               .then(() => setInviteCopied(true))
               .catch(() => {});
           }}
@@ -616,10 +654,39 @@ export default function App() {
           <span style={styles.identityText}>
             Signed in as <strong>{myName}</strong>
           </span>
-          <button style={styles.linkBtn} onClick={handleSignOut}>
-            sign out
-          </button>
+          <div style={{ display: "flex", gap: 12, alignItems: "center" }}>
+            <button
+              style={styles.linkBtn}
+              onClick={() => (isAdmin ? setShowAdminPanel(true) : setShowAdminGate(true))}
+            >
+              admin
+            </button>
+            <button style={styles.linkBtn} onClick={handleSignOut}>
+              sign out
+            </button>
+          </div>
         </div>
+
+        {showAdminGate && (
+          <div style={styles.settingsCard}>
+            <div style={{ display: "flex", flexDirection: "column", gap: 8, width: "100%" }}>
+              <span style={styles.settingsLabel}>Enter admin code</span>
+              <div style={{ display: "flex", gap: 6 }}>
+                <input
+                  style={styles.textInput}
+                  type="password"
+                  value={adminCodeInput}
+                  onChange={(e) => setAdminCodeInput(e.target.value)}
+                  onKeyDown={(e) => e.key === "Enter" && submitAdminCode()}
+                />
+                <button style={styles.primaryBtnSmall} onClick={submitAdminCode}>
+                  Enter
+                </button>
+              </div>
+              {adminError && <div style={styles.warningBox}>{adminError}</div>}
+            </div>
+          </div>
+        )}
 
         {showAccountSettings && (
           <div style={styles.settingsCard}>
@@ -1157,7 +1224,155 @@ function AuthScreen({ mode, setMode, form, setForm, error, busy, onSignUp, onSig
   );
 }
 
-function InvitePrompt({ inviteCopied, onCopy, onClose }) {
+function AdminPanel({ data, onClose }) {
+  const teachers = (data && data.teachers) || {};
+  const picks = (data && data.picks) || [];
+  const teacherIds = Object.keys(teachers);
+
+  const thirtyDaysAgo = useMemo(() => {
+    const d = new Date();
+    d.setDate(d.getDate() - 30);
+    return d.toISOString().slice(0, 10);
+  }, []);
+
+  const perTeacherStats = useMemo(() => {
+    const stats = {};
+    teacherIds.forEach((uid) => {
+      stats[uid] = { ratingCount: 0, activeRecently: false, invitees: [] };
+    });
+    picks.forEach((p) => {
+      Object.entries(p.ratings || {}).forEach(([uid, val]) => {
+        if (val === null || val === undefined) return;
+        if (!stats[uid]) stats[uid] = { ratingCount: 0, activeRecently: false, invitees: [] };
+        stats[uid].ratingCount += 1;
+        if (p.date >= thirtyDaysAgo) stats[uid].activeRecently = true;
+      });
+    });
+    teacherIds.forEach((uid) => {
+      const entry = teachers[uid];
+      if (entry && entry.invitedBy && stats[entry.invitedBy]) {
+        stats[entry.invitedBy].invitees.push(entry.name || uid);
+      }
+    });
+    return stats;
+  }, [teachers, picks, teacherIds, thirtyDaysAgo]);
+
+  const activeCount = teacherIds.filter((uid) => perTeacherStats[uid]?.activeRecently).length;
+  const totalRatings = picks.reduce(
+    (sum, p) => sum + Object.values(p.ratings || {}).filter((r) => r !== null && r !== undefined).length,
+    0
+  );
+
+  const genrePerf = useMemo(() => {
+    const groups = {};
+    picks.forEach((p) => {
+      const vals = Object.values(p.ratings || {}).filter((r) => r !== null && r !== undefined);
+      if (vals.length === 0) return;
+      const a = vals.reduce((s, v) => s + v, 0) / vals.length;
+      if (!groups[p.genre]) groups[p.genre] = { total: 0, count: 0 };
+      groups[p.genre].total += a;
+      groups[p.genre].count += 1;
+    });
+    return Object.entries(groups)
+      .map(([genre, { total, count }]) => ({ genre, avg: total / count, count }))
+      .sort((a, b) => b.avg - a.avg);
+  }, [picks]);
+
+  const sortedTeachers = useMemo(() => {
+    return teacherIds
+      .map((uid) => ({ uid, ...teachers[uid], ...perTeacherStats[uid] }))
+      .sort((a, b) => (b.joinedAt || "").localeCompare(a.joinedAt || ""));
+  }, [teacherIds, teachers, perTeacherStats]);
+
+  const nameOf = (uid) => (teachers[uid] && teachers[uid].name) || "—";
+
+  return (
+    <div style={styles.modalOverlay}>
+      <div style={styles.adminCard}>
+        <div style={styles.adminHeader}>
+          <h2 style={styles.powerTitle}>🔐 Admin Analytics</h2>
+          <button style={styles.ghostBtn} onClick={onClose}>
+            close
+          </button>
+        </div>
+
+        <div style={styles.adminStatGrid}>
+          <div style={styles.adminStatCard}>
+            <div style={styles.adminStatNum}>{teacherIds.length}</div>
+            <div style={styles.adminStatLabel}>registered teachers</div>
+          </div>
+          <div style={styles.adminStatCard}>
+            <div style={styles.adminStatNum}>{activeCount}</div>
+            <div style={styles.adminStatLabel}>active in last 30 days</div>
+          </div>
+          <div style={styles.adminStatCard}>
+            <div style={styles.adminStatNum}>{picks.length}</div>
+            <div style={styles.adminStatLabel}>songs picked</div>
+          </div>
+          <div style={styles.adminStatCard}>
+            <div style={styles.adminStatNum}>{totalRatings}</div>
+            <div style={styles.adminStatLabel}>total ratings submitted</div>
+          </div>
+        </div>
+
+        <h3 style={styles.adminSectionTitle}>Genre performance</h3>
+        <div style={styles.insightsList}>
+          {genrePerf.length === 0 ? (
+            <div style={styles.emptyState}>No rated songs yet.</div>
+          ) : (
+            genrePerf.map((g) => (
+              <div key={g.genre} style={styles.genreRow}>
+                <span style={styles.insightSongTitle}>{g.genre}</span>
+                <div style={styles.genreBarTrack}>
+                  <div style={{ ...styles.genreBarFill, width: `${(g.avg / 10) * 100}%` }} />
+                </div>
+                <span style={styles.insightScore}>★ {g.avg.toFixed(1)}</span>
+                <span style={styles.genreCount}>({g.count})</span>
+              </div>
+            ))
+          )}
+        </div>
+
+        <h3 style={styles.adminSectionTitle}>Registered teachers</h3>
+        <div style={styles.adminTableWrap}>
+          {sortedTeachers.length === 0 ? (
+            <div style={styles.emptyState}>Nobody's signed up yet.</div>
+          ) : (
+            <table style={styles.adminTable}>
+              <thead>
+                <tr>
+                  <th style={styles.adminTh}>Name</th>
+                  <th style={styles.adminTh}>Joined</th>
+                  <th style={styles.adminTh}>Invited by</th>
+                  <th style={styles.adminTh}>Invited</th>
+                  <th style={styles.adminTh}>Ratings</th>
+                </tr>
+              </thead>
+              <tbody>
+                {sortedTeachers.map((t) => (
+                  <tr key={t.uid}>
+                    <td style={styles.adminTd}>{t.name || "—"}</td>
+                    <td style={styles.adminTd}>{t.joinedAt ? t.joinedAt.slice(0, 10) : "—"}</td>
+                    <td style={styles.adminTd}>{t.invitedBy ? nameOf(t.invitedBy) : "—"}</td>
+                    <td style={styles.adminTd}>{(t.invitees || []).length}</td>
+                    <td style={styles.adminTd}>{t.ratingCount || 0}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
+        </div>
+
+        <p style={styles.adminFootnote}>
+          "Active" means they rated at least one song in the last 30 days. Email addresses aren't
+          shown here — this app only stores the display name each teacher chose at sign-up.
+        </p>
+      </div>
+    </div>
+  );
+}
+
+function InvitePrompt({ inviteLink, inviteCopied, onCopy, onClose }) {
   return (
     <div style={styles.modalOverlay}>
       <div style={styles.modalCard}>
@@ -1165,7 +1380,7 @@ function InvitePrompt({ inviteCopied, onCopy, onClose }) {
         <p style={styles.identityText}>
           This gets more fun with more teachers. Invite a few others by sharing this link:
         </p>
-        <div style={styles.inviteLinkBox}>{typeof window !== "undefined" ? window.location.href : ""}</div>
+        <div style={styles.inviteLinkBox}>{inviteLink}</div>
         <div style={{ display: "flex", gap: 8, marginTop: 10 }}>
           <button style={styles.primaryBtnSmall} onClick={onCopy}>
             {inviteCopied ? "Copied!" : "Copy link"}
@@ -1271,6 +1486,60 @@ const styles = {
     color: COLORS.chalkDim,
     wordBreak: "break-all",
   },
+  adminCard: {
+    width: "100%",
+    maxWidth: 720,
+    maxHeight: "85vh",
+    overflowY: "auto",
+    background: COLORS.bgAlt,
+    border: `1px solid ${COLORS.yellow}`,
+    borderRadius: 20,
+    padding: "24px 26px",
+  },
+  adminHeader: {
+    display: "flex",
+    justifyContent: "space-between",
+    alignItems: "flex-start",
+    marginBottom: 14,
+  },
+  adminStatGrid: {
+    display: "grid",
+    gridTemplateColumns: "repeat(auto-fit, minmax(140px, 1fr))",
+    gap: 10,
+    marginBottom: 24,
+  },
+  adminStatCard: {
+    background: "rgba(255,255,255,0.04)",
+    border: `1px solid ${COLORS.line}`,
+    borderRadius: 12,
+    padding: "14px 12px",
+    textAlign: "center",
+  },
+  adminStatNum: { fontSize: 26, fontWeight: 700, color: COLORS.yellow, fontFamily: "'JetBrains Mono', monospace" },
+  adminStatLabel: { fontSize: 11, color: COLORS.chalkDim, marginTop: 4 },
+  adminSectionTitle: {
+    fontFamily: "'Caveat', cursive",
+    fontSize: 24,
+    color: COLORS.yellow,
+    margin: "18px 0 10px",
+  },
+  adminTableWrap: { overflowX: "auto" },
+  adminTable: { width: "100%", borderCollapse: "collapse", fontSize: 13 },
+  adminTh: {
+    textAlign: "left",
+    padding: "8px 10px",
+    color: COLORS.chalkDim,
+    fontSize: 11,
+    textTransform: "uppercase",
+    letterSpacing: 0.5,
+    borderBottom: `1px solid ${COLORS.line}`,
+  },
+  adminTd: {
+    padding: "8px 10px",
+    color: COLORS.chalk,
+    borderBottom: `1px solid ${COLORS.line}`,
+  },
+  adminFootnote: { fontSize: 11, color: COLORS.chalkDim, marginTop: 16, fontStyle: "italic" },
   board: { maxWidth: 780, margin: "0 auto" },
   header: {
     display: "flex",

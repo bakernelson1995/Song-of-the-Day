@@ -23,9 +23,8 @@ export const db = getFirestore(app);
 export const auth = getAuth(app);
 
 // One shared document holds { picks, teachers }.
-// `teachers` maps each signed-in person's account id -> the display name
-// they chose at sign-up, so ratings can be tied to a real account instead
-// of a name anyone could pick off a list.
+// `teachers` maps each signed-in person's account id ->
+// { name, joinedAt, invitedBy } so the admin panel has real data to show.
 export const dataRef = doc(db, "song-of-the-day", "shared");
 
 export async function loadData() {
@@ -53,11 +52,11 @@ export function subscribeToData(onData, onErr) {
   );
 }
 
-// Registers/updates just this one person's name in the shared teachers map,
+// Registers/updates just this one person's entry in the shared teachers map,
 // using a targeted field update rather than rewriting the whole document —
 // this avoids clobbering someone else's simultaneous sign-up.
-export async function registerTeacherName(uid, name) {
-  await setDoc(dataRef, { teachers: { [uid]: name } }, { merge: true });
+export async function registerTeacher(uid, fields) {
+  await setDoc(dataRef, { teachers: { [uid]: fields } }, { merge: true });
 }
 
 // ---------- Auth ----------
@@ -66,10 +65,14 @@ export function watchAuth(callback) {
   return onAuthStateChanged(auth, callback);
 }
 
-export async function signUp(email, password, displayName) {
+export async function signUp(email, password, displayName, invitedBy) {
   const cred = await createUserWithEmailAndPassword(auth, email, password);
   await updateProfile(cred.user, { displayName });
-  await registerTeacherName(cred.user.uid, displayName);
+  await registerTeacher(cred.user.uid, {
+    name: displayName,
+    joinedAt: new Date().toISOString(),
+    invitedBy: invitedBy || null,
+  });
   return cred.user;
 }
 
