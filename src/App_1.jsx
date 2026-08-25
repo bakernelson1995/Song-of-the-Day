@@ -487,14 +487,26 @@ export default function App() {
   const pickedToday = data?.picks?.find((p) => p.date === today);
   const canRoll = !pickedToday || pickedToday.rejected;
 
-  // Today's pick is excluded from every ranking/trend/history view below —
-  // its average only appears in the main card, and only after you've rated
-  // it yourself (see MyRatingBlock). This avoids anchoring anyone's rating
-  // on a number they saw before they'd formed their own opinion.
+  // Today's pick is excluded from every ranking/trend view below (weekly,
+  // monthly, Power Rankings, genre trends, "we all loved") — it can't count
+  // toward those until its day is actually over, for everyone, regardless
+  // of who's looked at it or rated it yet.
   const picksExcludingToday = useMemo(() => {
     if (!data) return [];
     return pickedToday ? data.picks.filter((p) => p.id !== pickedToday.id) : data.picks;
   }, [data, pickedToday]);
+
+  // The Past Picks / History list is different: it's personal. Today's pick
+  // shows up there as soon as *you* have rated it — no need to wait for the
+  // day to end — since the anchoring risk that made us hide it is gone once
+  // you've already formed your own opinion.
+  const picksForHistory = useMemo(() => {
+    if (!data) return [];
+    if (!pickedToday) return data.picks;
+    const myRating = authUser && pickedToday.ratings ? pickedToday.ratings[authUser.uid] : undefined;
+    const iHaveRatedToday = myRating !== null && myRating !== undefined;
+    return iHaveRatedToday ? data.picks : data.picks.filter((p) => p.id !== pickedToday.id);
+  }, [data, pickedToday, authUser]);
 
   const weeklyTop = useMemo(() => {
     if (!data) return [];
@@ -569,7 +581,7 @@ export default function App() {
 
   const visiblePicks = useMemo(() => {
     if (!data) return [];
-    let list = [...picksExcludingToday];
+    let list = [...picksForHistory];
     if (filterGenre !== "All") list = list.filter((p) => p.genre === filterGenre);
     if (minRating > 0) {
       list = list.filter((p) => {
@@ -584,7 +596,7 @@ export default function App() {
     if (sortBy === "rating-low")
       list.sort((a, b) => (avg(a.ratings) ?? 11) - (avg(b.ratings) ?? 11));
     return list;
-  }, [data, picksExcludingToday, filterGenre, minRating, sortBy]);
+  }, [data, picksForHistory, filterGenre, minRating, sortBy]);
 
   if (loading || authLoading) {
     return (
