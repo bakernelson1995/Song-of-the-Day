@@ -9,6 +9,7 @@ import {
   setRating,
   claimAndAddPick,
   rejectPickAndUnlock,
+  migrateLegacyPicks,
   watchAuth,
   signUp,
   signIn,
@@ -159,6 +160,29 @@ export default function App() {
   const [showAccountSettings, setShowAccountSettings] = useState(false);
   const [myNameEdit, setMyNameEdit] = useState("");
   const [inviteCopied, setInviteCopied] = useState(false);
+  const [migrating, setMigrating] = useState(false);
+  const [migrateResult, setMigrateResult] = useState(null);
+
+  const runMigration = async () => {
+    setMigrating(true);
+    setMigrateResult(null);
+    try {
+      const result = await migrateLegacyPicks();
+      if (result.found === 0) {
+        setMigrateResult("Nothing to recover — no old data found.");
+      } else {
+        setMigrateResult(
+          `Recovered ${result.migrated} of ${result.found} old song${result.found === 1 ? "" : "s"}${
+            result.found !== result.migrated ? " (some were already here)" : ""
+          }.`
+        );
+      }
+    } catch (e) {
+      setMigrateResult("Something went wrong — try again in a moment.");
+    } finally {
+      setMigrating(false);
+    }
+  };
 
   // Whoever's link was clicked to get here — captured once on load, used to
   // credit the inviter if this visitor signs up.
@@ -772,6 +796,20 @@ export default function App() {
                 />
                 <span>Only suggest songs released 1982–present</span>
               </label>
+              <div style={{ borderTop: `1px solid ${COLORS.line}`, paddingTop: 10, marginTop: 4 }}>
+                <span style={styles.settingsLabel}>
+                  If songs from before the last update seem to be missing, this recovers them —
+                  safe to click more than once.
+                </span>
+                <button
+                  style={{ ...styles.primaryBtnSmall, marginTop: 8 }}
+                  onClick={runMigration}
+                  disabled={migrating}
+                >
+                  {migrating ? "Checking…" : "Recover old songs"}
+                </button>
+                {migrateResult && <div style={styles.smallLabel}>{migrateResult}</div>}
+              </div>
             </div>
           </div>
         )}

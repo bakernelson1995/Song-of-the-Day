@@ -3,6 +3,7 @@ import {
   getFirestore,
   doc,
   getDoc,
+  getDocs,
   setDoc,
   updateDoc,
   deleteDoc,
@@ -104,6 +105,44 @@ export async function updatePick(pickId, fields) {
 
 export async function deletePickDoc(pickId) {
   await deleteDoc(doc(picksCol, pickId));
+}
+
+// ---------- One-time recovery migration ----------
+//
+// Before songs were split into individual documents, they lived as one big
+// array field (`picks`) on the shared meta document. That old field is
+// still sitting there, untouched, since nothing currently writes to it —
+// this pulls it out, copies each song into the new picks subcollection
+// (skipping anything that looks like a duplicate of something already
+// migrated), then removes the old field so this only ever needs to run once.
+export async function migrateLegacyPicks() {
+  const snap = await getDoc(metaRef);
+  if (!snap.exists()) return { migrated: 0, found: 0 };
+
+  const legacy = snap.data().picks;
+  if (!Array.isArray(legacy) || legacy.length === 0) return { migrated: 0, found: 0 };
+
+  const existingSnap = await getDocs(picksCol);
+  const existingKeys = new Set(
+    existingSnap.docs.map((d) => {
+      const v = d.data();
+      return `${(v.title || "").toLowerCase()}::${(v.artist || "").toLowerCase()}::${v.date}`;
+    })
+  );
+
+  let migrated = 0;
+  for (const p of legacy) {
+    const key = `${(p.title || "").toLowerCase()}::${(p.artist || "").toLowerCase()}::${p.date}`;
+    if (existingKeys.has(key)) continue;
+    existingKeys.add(key);
+    const { id, ...fields } = p;
+    const pickId = id || Math.random().toString(36).slice(2, 10);
+    await setDoc(doc(picksCol, pickId), fields);
+    migrated++;
+  }
+
+  await updateDoc(metaRef, { picks: deleteField() });
+  return { migrated, found: legacy.length };
 }
 
 // Sets or clears one person's rating on one song, touching nothing else on
