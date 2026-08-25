@@ -1,5 +1,18 @@
 import { initializeApp } from "firebase/app";
-import { getFirestore, doc, getDoc, setDoc, onSnapshot } from "firebase/firestore";
+import {
+  getFirestore,
+  doc,
+  getDoc,
+  setDoc,
+  updateDoc,
+  deleteDoc,
+  deleteField,
+  collection,
+  onSnapshot,
+  query,
+  orderBy,
+  runTransaction,
+} from "firebase/firestore";
 import {
   getAuth,
   onAuthStateChanged,
@@ -22,41 +35,131 @@ const app = initializeApp(firebaseConfig);
 export const db = getFirestore(app);
 export const auth = getAuth(app);
 
-// One shared document holds { picks, teachers }.
-// `teachers` maps each signed-in person's account id ->
-// { name, joinedAt, invitedBy } so the admin panel has real data to show.
-export const dataRef = doc(db, "song-of-the-day", "shared");
+// ---------- Data model ----------
+// song-of-the-day/shared            -> small doc: { yearFilterEnabled, teachers }
+// song-of-the-day/shared/picks/{id} -> ONE DOCUMENT PER SONG
+//
+// Each song being its own document (instead of one big array on the shared
+// doc) is what actually makes this safe for many concurrent users: adding a
+// song, rating a song, or importing history only ever touches that one
+// song's document. Nobody's action can overwrite anyone else's.
 
-export async function loadData() {
-  const snap = await getDoc(dataRef);
+export const metaRef = doc(db, "song-of-the-day", "shared");
+export const picksCol = collection(db, "song-of-the-day", "shared", "picks");
+export const dayLocksCol = collection(db, "song-of-the-day", "shared", "dayLocks");
+
+// ---------- Shared metadata (year filter setting, teacher registry) ----------
+
+export async function loadMeta() {
+  const snap = await getDoc(metaRef);
   return snap.exists() ? snap.data() : null;
 }
 
-export async function saveData(data) {
-  await setDoc(dataRef, data, { merge: true });
-}
-
-// Real-time listener — every teacher's screen updates live when anyone else
-// picks a song, rates one, or signs up. onErr fires on read failures
-// (e.g. offline, or Firestore rules rejecting the read).
-export function subscribeToData(onData, onErr) {
+export function subscribeToMeta(onData, onErr) {
   return onSnapshot(
-    dataRef,
-    (snap) => {
-      onData(snap.exists() ? snap.data() : null);
-    },
+    metaRef,
+    (snap) => onData(snap.exists() ? snap.data() : null),
     (err) => {
-      console.error("Firestore subscription error:", err);
+      console.error("Meta subscription error:", err);
       if (onErr) onErr(err);
     }
   );
 }
 
+export async function setYearFilter(enabled) {
+  await setDoc(metaRef, { yearFilterEnabled: enabled }, { merge: true });
+}
+
 // Registers/updates just this one person's entry in the shared teachers map,
-// using a targeted field update rather than rewriting the whole document —
-// this avoids clobbering someone else's simultaneous sign-up.
+// using a targeted field update — this avoids clobbering someone else's
+// simultaneous sign-up.
 export async function registerTeacher(uid, fields) {
-  await setDoc(dataRef, { teachers: { [uid]: fields } }, { merge: true });
+  await setDoc(metaRef, { teachers: { [uid]: fields } }, { merge: true });
+}
+
+// ---------- Songs (one document each) ----------
+
+export function subscribeToPicks(onData, onErr) {
+  const q = query(picksCol, orderBy("date", "desc"));
+  return onSnapshot(
+    q,
+    (snap) => {
+      const picks = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
+      onData(picks);
+    },
+    (err) => {
+      console.error("Picks subscription error:", err);
+      if (onErr) onErr(err);
+    }
+  );
+}
+
+export async function addPick(pickId, fields) {
+  await setDoc(doc(picksCol, pickId), fields);
+}
+
+export async function updatePick(pickId, fields) {
+  await updateDoc(doc(picksCol, pickId), fields);
+}
+
+export async function deletePickDoc(pickId) {
+  await deleteDoc(doc(picksCol, pickId));
+}
+
+// Sets or clears one person's rating on one song, touching nothing else on
+// that document — this is the operation that used to be the riskiest one
+// (every rating write used to resave the entire song list).
+export async function setRating(pickId, uid, value) {
+  if (value === null || value === undefined) {
+    await updateDoc(doc(picksCol, pickId), { [`ratings.${uid}`]: deleteField() });
+  } else {
+    await updateDoc(doc(picksCol, pickId), { [`ratings.${uid}`]: value });
+  }
+}
+
+// ---------- One-roll-per-day, enforced by the database itself ----------
+//
+// Each calendar date has a small "lock" document tracking which pick (if
+// any) is the currently-active one for that day. claimAndAddPick reads that
+// lock and writes the new song in a single atomic transaction — if two
+// people trigger this within the same instant, Firestore guarantees only
+// one of them can win; the other's transaction is retried and then sees
+// the lock already taken and fails cleanly, instead of both succeeding.
+
+export async function claimAndAddPick(date, pickId, fields) {
+  const lockRef = doc(dayLocksCol, date);
+  const pickRef = doc(picksCol, pickId);
+
+  await runTransaction(db, async (tx) => {
+    const lockSnap = await tx.get(lockRef);
+    const activeId = lockSnap.exists() ? lockSnap.data().activePickId : null;
+
+    if (activeId) {
+      const activePickSnap = await tx.get(doc(picksCol, activeId));
+      const stillActive = activePickSnap.exists() && !activePickSnap.data().rejected;
+      if (stillActive) {
+        const err = new Error("Today's song was already picked.");
+        err.code = "ALREADY_PICKED_TODAY";
+        throw err;
+      }
+    }
+
+    tx.set(pickRef, fields);
+    tx.set(lockRef, { activePickId: pickId });
+  });
+}
+
+// Marks a pick as rejected and releases that day's lock in one atomic step,
+// so the "re-roll" button that appears afterward is guaranteed to work
+// rather than racing another reject/roll happening at the same moment.
+export async function rejectPickAndUnlock(date, pickId) {
+  const lockRef = doc(dayLocksCol, date);
+  const pickRef = doc(picksCol, pickId);
+
+  await runTransaction(db, async (tx) => {
+    tx.update(pickRef, { rejected: true, previewed: false });
+    tx.set(lockRef, { activePickId: null });
+  });
 }
 
 // ---------- Auth ----------

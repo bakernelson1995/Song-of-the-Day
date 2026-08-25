@@ -1,5 +1,20 @@
 import React, { useState, useEffect, useMemo, useCallback } from "react";
-import { loadData, saveData, subscribeToData, watchAuth, signUp, signIn, signOutUser, registerTeacher } from "./firebase";
+import {
+  subscribeToMeta,
+  subscribeToPicks,
+  setYearFilter,
+  addPick,
+  updatePick,
+  deletePickDoc,
+  setRating,
+  claimAndAddPick,
+  rejectPickAndUnlock,
+  watchAuth,
+  signUp,
+  signIn,
+  signOutUser,
+  registerTeacher,
+} from "./firebase";
 
 // ---------- Fallback pool: used only if the live AI suggestion request fails ----------
 const FALLBACK_POOL = [
@@ -111,15 +126,13 @@ function getMonthInfo(dateStr) {
   return { key, label };
 }
 
-function defaultData() {
-  return { teachers: {}, picks: [], yearFilterEnabled: true };
-}
-
 export default function App() {
-  const [data, setData] = useState(null);
-  const [loading, setLoading] = useState(true);
+  const [meta, setMeta] = useState(null);
+  const [picks, setPicks] = useState(null);
+  const [metaLoaded, setMetaLoaded] = useState(false);
+  const [picksLoaded, setPicksLoaded] = useState(false);
+  const loading = !metaLoaded || !picksLoaded;
   const [error, setError] = useState(null);
-  const [saving, setSaving] = useState(false);
 
   const [filterGenre, setFilterGenre] = useState("All");
   const [minRating, setMinRating] = useState(0);
@@ -239,36 +252,59 @@ export default function App() {
   };
 
   useEffect(() => {
-    const unsubscribe = subscribeToData(
-      (newData) => {
-        setData(newData || defaultData());
-        setLoading(false);
+    if (!authUser) {
+      // Not signed in yet (or just signed out) — nothing to load, and
+      // Firestore will reject the read anyway since rules require auth.
+      setMeta(null);
+      setPicks(null);
+      setMetaLoaded(false);
+      setPicksLoaded(false);
+      return;
+    }
+    const unsubMeta = subscribeToMeta(
+      (m) => {
+        setMeta(m || { yearFilterEnabled: true, teachers: {} });
+        setMetaLoaded(true);
       },
       () => {
         setError("Couldn't load — check your connection and try again.");
-        setData(defaultData());
-        setLoading(false);
+        setMeta({ yearFilterEnabled: true, teachers: {} });
+        setMetaLoaded(true);
       }
     );
-    return () => unsubscribe();
-  }, []);
+    const unsubPicks = subscribeToPicks(
+      (p) => {
+        setPicks(p);
+        setPicksLoaded(true);
+      },
+      () => {
+        setError("Couldn't load — check your connection and try again.");
+        setPicks([]);
+        setPicksLoaded(true);
+      }
+    );
+    return () => {
+      unsubMeta();
+      unsubPicks();
+    };
+  }, [authUser]);
 
-  const save = useCallback(async (next) => {
-    setData(next);
-    setSaving(true);
-    try {
-      await saveData(next);
-    } catch (e) {
-      setError("Couldn't save — check your connection and try again.");
-    } finally {
-      setSaving(false);
-    }
-  }, []);
+  // The rest of the app reads a single `data` object shaped like
+  // { yearFilterEnabled, teachers, picks } — this just combines the two
+  // independent subscriptions above into that familiar shape for reading.
+  // Writes no longer go through a combined save() — see the targeted
+  // addPick/updatePick/setRating/setYearFilter calls used throughout below,
+  // each of which only ever touches the one document it needs to.
+  const data = useMemo(() => {
+    if (!meta || !picks) return null;
+    return { ...meta, picks };
+  }, [meta, picks]);
 
   const pickSong = async () => {
     setPicking(true);
     setPickError(null);
 
+    const today = new Date().toISOString().slice(0, 10);
     const usedKeys = new Set(data.picks.map((p) => `${p.title.toLowerCase()}::${p.artist.toLowerCase()}`));
     const recentList = data.picks
       .slice(0, 60)
@@ -277,6 +313,9 @@ export default function App() {
 
     // Every coded genre is equally likely — the person never chooses this.
     const rolledGenre = REAL_GENRES[Math.floor(Math.random() * REAL_GENRES.length)];
+
+    let suggestion = null;
+    let usedFallback = false;
 
     try {
       const response = await fetch("/api/pick-song", {
@@ -293,7 +332,7 @@ export default function App() {
       const textBlock = (json.content || []).find((b) => b.type === "text");
       if (!textBlock) throw new Error("No text in response");
       const cleaned = textBlock.text.replace(/```json|```/g, "").trim();
-      const suggestion = JSON.parse(cleaned);
+      suggestion = JSON.parse(cleaned);
 
       if (!suggestion.title || !suggestion.artist) throw new Error("Malformed suggestion");
 
@@ -302,24 +341,9 @@ export default function App() {
         // extremely rare — the model repeated something despite the exclude list
         throw new Error("Duplicate suggestion");
       }
-
-      const flagged = containsFlaggedWord(suggestion.title) || containsFlaggedWord(suggestion.artist);
-      const entry = {
-        id: uid(),
-        title: suggestion.title,
-        artist: suggestion.artist,
-        genre: suggestion.genre || rolledGenre,
-        reason: suggestion.reason || "",
-        date: new Date().toISOString().slice(0, 10),
-        ratings: {},
-        source: "ai",
-        previewed: false,
-        flagged,
-      };
-      await save({ ...data, picks: [entry, ...data.picks] });
-      setJustPicked(entry.id);
     } catch (e) {
       // Fall back to the small local pool so the app still works if the request fails
+      usedFallback = true;
       let candidates = FALLBACK_POOL.filter(
         (s) => !usedKeys.has(`${s.title.toLowerCase()}::${s.artist.toLowerCase()}`)
       );
@@ -331,72 +355,93 @@ export default function App() {
       }
       if (candidates.length === 0) candidates = FALLBACK_POOL;
       const choice = candidates[Math.floor(Math.random() * candidates.length)];
-      const entry = {
-        id: uid(),
-        title: choice.title,
-        artist: choice.artist,
-        genre: choice.genre,
-        date: new Date().toISOString().slice(0, 10),
-        ratings: {},
-        source: "pool-fallback",
-        previewed: false,
-        flagged: false,
-      };
-      await save({ ...data, picks: [entry, ...data.picks] });
-      setJustPicked(entry.id);
-      setPickError("Couldn't reach the song generator, so we grabbed one from the backup list instead.");
+      suggestion = { title: choice.title, artist: choice.artist, genre: choice.genre, reason: "" };
+    }
+
+    const flagged = containsFlaggedWord(suggestion.title) || containsFlaggedWord(suggestion.artist);
+    const newId = uid();
+    const entry = {
+      title: suggestion.title,
+      artist: suggestion.artist,
+      genre: suggestion.genre || rolledGenre,
+      reason: suggestion.reason || "",
+      date: today,
+      ratings: {},
+      source: usedFallback ? "pool-fallback" : "ai",
+      previewed: false,
+      flagged,
+    };
+
+    try {
+      // This is the atomic step: Firestore guarantees only one caller can
+      // successfully claim today, even if two people click at once.
+      await claimAndAddPick(today, newId, entry);
+      setJustPicked(newId);
+      if (usedFallback) {
+        setPickError("Couldn't reach the song generator, so we grabbed one from the backup list instead.");
+      }
+    } catch (e) {
+      if (e.code === "ALREADY_PICKED_TODAY") {
+        setPickError("Someone else just picked today's song a moment ago.");
+      } else {
+        setPickError("Couldn't save that pick — check your connection and try again.");
+      }
     } finally {
       setPicking(false);
     }
   };
 
-  const addCustomSong = () => {
+  const addCustomSong = async () => {
     if (!newSong.title.trim() || !newSong.artist.trim() || !newSong.previewed) return;
     const flagged = containsFlaggedWord(newSong.title) || containsFlaggedWord(newSong.artist);
+    const newId = uid();
+    const today = new Date().toISOString().slice(0, 10);
     const entry = {
-      id: uid(),
       title: newSong.title.trim(),
       artist: newSong.artist.trim(),
       genre: newSong.genre,
-      date: new Date().toISOString().slice(0, 10),
+      date: today,
       ratings: {},
       custom: true,
       previewed: true,
       flagged,
     };
-    save({ ...data, picks: [entry, ...data.picks] });
-    setJustPicked(entry.id);
-    setNewSong({ title: "", artist: "", genre: "Instrumental", previewed: false });
-    setShowAdd(false);
+    try {
+      await claimAndAddPick(today, newId, entry);
+      setJustPicked(newId);
+      setNewSong({ title: "", artist: "", genre: "Instrumental", previewed: false });
+      setShowAdd(false);
+    } catch (e) {
+      if (e.code === "ALREADY_PICKED_TODAY") {
+        setPickError("Someone else already picked today's song a moment ago.");
+      } else {
+        setPickError("Couldn't save that song — check your connection and try again.");
+      }
+    }
   };
 
-  const rate = (pickId, uid, value) => {
+  const rate = (pickId, raterUid, value) => {
     const v = value === "" ? null : Math.max(0, Math.min(10, Number(value)));
-    const picks = data.picks.map((p) => {
-      if (p.id !== pickId) return p;
-      const ratings = { ...p.ratings };
-      if (v === null) {
-        delete ratings[uid];
-      } else {
-        ratings[uid] = v;
-      }
-      return { ...p, ratings };
-    });
-    save({ ...data, picks });
+    setRating(pickId, raterUid, v);
   };
 
   const markPreviewed = (pickId) => {
-    const picks = data.picks.map((p) =>
-      p.id === pickId ? { ...p, previewed: !p.previewed, rejected: false } : p
-    );
-    save({ ...data, picks });
+    const pick = data.picks.find((p) => p.id === pickId);
+    if (!pick) return;
+    updatePick(pickId, { previewed: !pick.previewed, rejected: false });
   };
 
   const markRejected = (pickId) => {
-    const picks = data.picks.map((p) =>
-      p.id === pickId ? { ...p, rejected: !p.rejected, previewed: false } : p
-    );
-    save({ ...data, picks });
+    const pick = data.picks.find((p) => p.id === pickId);
+    if (!pick) return;
+    if (pick.rejected) {
+      // Un-rejecting is a rare manual correction — just flip the field back.
+      updatePick(pickId, { rejected: false });
+    } else {
+      // Rejecting is what unlocks a re-roll, so it needs to be atomic with
+      // releasing that day's lock.
+      rejectPickAndUnlock(pick.date, pickId);
+    }
   };
 
   const importHistoricalPicks = () => {
@@ -455,7 +500,12 @@ export default function App() {
     });
 
     if (newPicks.length > 0) {
-      save({ ...data, picks: [...data.picks, ...newPicks] });
+      Promise.all(
+        newPicks.map((p) => {
+          const { id, ...fields } = p;
+          return addPick(id, fields);
+        })
+      ).catch(() => setError("Some songs failed to import — check your connection and try again."));
     }
     setImportMsg(
       `Imported ${added} song${added === 1 ? "" : "s"}${
@@ -466,7 +516,7 @@ export default function App() {
   };
 
   const deletePick = (id) => {
-    save({ ...data, picks: data.picks.filter((p) => p.id !== id) });
+    deletePickDoc(id);
   };
 
   const avg = (ratings) => {
@@ -479,14 +529,26 @@ export default function App() {
   const pickedToday = data?.picks?.find((p) => p.date === today);
   const canRoll = !pickedToday || pickedToday.rejected;
 
-  // Today's pick is excluded from every ranking/trend/history view below —
-  // its average only appears in the main card, and only after you've rated
-  // it yourself (see MyRatingBlock). This avoids anchoring anyone's rating
-  // on a number they saw before they'd formed their own opinion.
+  // Today's pick is excluded from every ranking/trend view below (weekly,
+  // monthly, Power Rankings, genre trends, "we all loved") — it can't count
+  // toward those until its day is actually over, for everyone, regardless
+  // of who's looked at it or rated it yet.
   const picksExcludingToday = useMemo(() => {
     if (!data) return [];
     return pickedToday ? data.picks.filter((p) => p.id !== pickedToday.id) : data.picks;
   }, [data, pickedToday]);
+
+  // The Past Picks / History list is different: it's personal. Today's pick
+  // shows up there as soon as *you* have rated it — no need to wait for the
+  // day to end — since the anchoring risk that made us hide it is gone once
+  // you've already formed your own opinion.
+  const picksForHistory = useMemo(() => {
+    if (!data) return [];
+    if (!pickedToday) return data.picks;
+    const myRating = authUser && pickedToday.ratings ? pickedToday.ratings[authUser.uid] : undefined;
+    const iHaveRatedToday = myRating !== null && myRating !== undefined;
+    return iHaveRatedToday ? data.picks : data.picks.filter((p) => p.id !== pickedToday.id);
+  }, [data, pickedToday, authUser]);
 
   const weeklyTop = useMemo(() => {
     if (!data) return [];
@@ -561,7 +623,7 @@ export default function App() {
 
   const visiblePicks = useMemo(() => {
     if (!data) return [];
-    let list = [...picksExcludingToday];
+    let list = [...picksForHistory];
     if (filterGenre !== "All") list = list.filter((p) => p.genre === filterGenre);
     if (minRating > 0) {
       list = list.filter((p) => {
@@ -576,7 +638,7 @@ export default function App() {
     if (sortBy === "rating-low")
       list.sort((a, b) => (avg(a.ratings) ?? 11) - (avg(b.ratings) ?? 11));
     return list;
-  }, [data, picksExcludingToday, filterGenre, minRating, sortBy]);
+  }, [data, picksForHistory, filterGenre, minRating, sortBy]);
 
   if (loading || authLoading) {
     return (
@@ -706,7 +768,7 @@ export default function App() {
                 <input
                   type="checkbox"
                   checked={data.yearFilterEnabled !== false}
-                  onChange={(e) => save({ ...data, yearFilterEnabled: e.target.checked })}
+                  onChange={(e) => setYearFilter(e.target.checked)}
                 />
                 <span>Only suggest songs released 1982–present</span>
               </label>
@@ -1104,7 +1166,7 @@ export default function App() {
         </section>
 
         <footer style={styles.footer}>
-          {saving ? "saving…" : error ? error : "synced across everyone"}
+          {error ? error : "synced across everyone"}
         </footer>
       </div>
     </div>
