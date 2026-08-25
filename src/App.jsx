@@ -131,7 +131,6 @@ export default function App() {
   const [picks, setPicks] = useState(null);
   const [metaLoaded, setMetaLoaded] = useState(false);
   const [picksLoaded, setPicksLoaded] = useState(false);
-  const loading = !metaLoaded || !picksLoaded;
   const [error, setError] = useState(null);
 
   const [filterGenre, setFilterGenre] = useState("All");
@@ -155,6 +154,7 @@ export default function App() {
   const [authForm, setAuthForm] = useState({ name: "", email: "", password: "" });
   const [authError, setAuthError] = useState(null);
   const [authBusy, setAuthBusy] = useState(false);
+  const loading = !!authUser && (!metaLoaded || !picksLoaded);
   const [showInvitePrompt, setShowInvitePrompt] = useState(false);
   const [showAccountSettings, setShowAccountSettings] = useState(false);
   const [myNameEdit, setMyNameEdit] = useState("");
@@ -197,11 +197,6 @@ export default function App() {
     });
     return () => unsubscribe();
   }, []);
-
-  const myTeacherEntry = authUser && data && data.teachers ? data.teachers[authUser.uid] : null;
-  const myName = authUser
-    ? (myTeacherEntry && myTeacherEntry.name) || authUser.displayName || authUser.email
-    : null;
 
   const handleSignUp = async () => {
     setAuthError(null);
@@ -299,6 +294,11 @@ export default function App() {
     if (!meta || !picks) return null;
     return { ...meta, picks };
   }, [meta, picks]);
+
+  const myTeacherEntry = authUser && data && data.teachers ? data.teachers[authUser.uid] : null;
+  const myName = authUser
+    ? (myTeacherEntry && myTeacherEntry.name) || authUser.displayName || authUser.email
+    : null;
 
   const pickSong = async () => {
     setPicking(true);
