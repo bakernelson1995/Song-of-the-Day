@@ -108,45 +108,6 @@ function friendlyAuthError(e) {
   return "Something went wrong — please try again.";
 }
 
-// Builds a plain-text, per-person breakdown for exactly one song and
-// triggers a browser download. Only ever called for today's pick — once
-// the day passes, this button no longer renders anywhere, so there's no
-// way to pull this same individual-vote breakdown for a past song.
-function downloadDailyAnalytics(pick, teachers) {
-  const ratings = pick.ratings || {};
-  const rows = Object.keys(teachers)
-    .map((uid) => {
-      const name = (teachers[uid] && teachers[uid].name) || "Unknown";
-      const val = ratings[uid];
-      return { name, val: val === null || val === undefined ? null : val };
-    })
-    .sort((a, b) => a.name.localeCompare(b.name));
-
-  const vals = rows.filter((r) => r.val !== null).map((r) => r.val);
-  const avgVal = vals.length ? (vals.reduce((s, v) => s + v, 0) / vals.length).toFixed(1) : "—";
-
-  const lines = [
-    "Song of the Day — Daily Ratings",
-    `Date: ${pick.date}`,
-    `Song: ${pick.title} — ${pick.artist}`,
-    `Genre: ${pick.genre}`,
-    "",
-    "Individual ratings:",
-    ...rows.map((r) => `  ${r.name}: ${r.val === null ? "(not yet rated)" : `${r.val}/10`}`),
-    "",
-    `Average: ${avgVal}${vals.length ? "/10" : ""} (${vals.length} of ${rows.length} rated)`,
-  ];
-
-  const blob = new Blob([lines.join("\n")], { type: "text/plain" });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement("a");
-  a.href = url;
-  a.download = `song-of-the-day-ratings-${pick.date}.txt`;
-  document.body.appendChild(a);
-  a.click();
-  document.body.removeChild(a);
-  URL.revokeObjectURL(url);
-}
 
 function getWeekInfo(dateStr) {
   const d = new Date(dateStr + "T00:00:00");
@@ -202,6 +163,7 @@ export default function App() {
   const [inviteCopied, setInviteCopied] = useState(false);
   const [migrating, setMigrating] = useState(false);
   const [migrateResult, setMigrateResult] = useState(null);
+  const [showBreakdown, setShowBreakdown] = useState(false);
 
   const runMigration = async () => {
     setMigrating(true);
@@ -1237,12 +1199,32 @@ export default function App() {
                         : `★ ${a.toFixed(1)} avg · ${Object.values(p.ratings || {}).filter((r) => r !== null && r !== undefined).length} ratings`}
                     </div>
                     {pickedToday && p.id === pickedToday.id && (
-                      <button
-                        style={styles.downloadBtn}
-                        onClick={() => downloadDailyAnalytics(p, data.teachers || {})}
-                      >
-                        📊 download today's ratings
-                      </button>
+                      <>
+                        <button style={styles.downloadBtn} onClick={() => setShowBreakdown((s) => !s)}>
+                          {showBreakdown ? "hide who rated what" : "👀 see who rated what"}
+                        </button>
+                        {showBreakdown && (
+                          <div style={styles.breakdownList}>
+                            {Object.keys(data.teachers || {})
+                              .map((tid) => ({
+                                name: (data.teachers[tid] && data.teachers[tid].name) || "Unknown",
+                                val:
+                                  p.ratings && p.ratings[tid] !== undefined && p.ratings[tid] !== null
+                                    ? p.ratings[tid]
+                                    : null,
+                              }))
+                              .sort((x, y) => x.name.localeCompare(y.name))
+                              .map((r) => (
+                                <div key={r.name} style={styles.breakdownRow}>
+                                  <span>{r.name}</span>
+                                  <span style={styles.breakdownVal}>
+                                    {r.val === null ? "not yet rated" : `${r.val}/10`}
+                                  </span>
+                                </div>
+                              ))}
+                          </div>
+                        )}
+                      </>
                     )}
                   </div>
                 );
@@ -2274,6 +2256,22 @@ const styles = {
     cursor: "pointer",
     width: "100%",
   },
+  breakdownList: {
+    marginTop: 8,
+    display: "flex",
+    flexDirection: "column",
+    gap: 4,
+    background: "rgba(0,0,0,0.04)",
+    borderRadius: 8,
+    padding: "8px 10px",
+  },
+  breakdownRow: {
+    display: "flex",
+    justifyContent: "space-between",
+    fontSize: 12,
+    color: "#3a3320",
+  },
+  breakdownVal: { fontWeight: 700, color: "#a8492b" },
   footer: {
     textAlign: "center",
     fontSize: 11,
