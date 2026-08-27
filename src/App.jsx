@@ -108,6 +108,46 @@ function friendlyAuthError(e) {
   return "Something went wrong — please try again.";
 }
 
+// Builds a plain-text, per-person breakdown for exactly one song and
+// triggers a browser download. Only ever called for today's pick — once
+// the day passes, this button no longer renders anywhere, so there's no
+// way to pull this same individual-vote breakdown for a past song.
+function downloadDailyAnalytics(pick, teachers) {
+  const ratings = pick.ratings || {};
+  const rows = Object.keys(teachers)
+    .map((uid) => {
+      const name = (teachers[uid] && teachers[uid].name) || "Unknown";
+      const val = ratings[uid];
+      return { name, val: val === null || val === undefined ? null : val };
+    })
+    .sort((a, b) => a.name.localeCompare(b.name));
+
+  const vals = rows.filter((r) => r.val !== null).map((r) => r.val);
+  const avgVal = vals.length ? (vals.reduce((s, v) => s + v, 0) / vals.length).toFixed(1) : "—";
+
+  const lines = [
+    "Song of the Day — Daily Ratings",
+    `Date: ${pick.date}`,
+    `Song: ${pick.title} — ${pick.artist}`,
+    `Genre: ${pick.genre}`,
+    "",
+    "Individual ratings:",
+    ...rows.map((r) => `  ${r.name}: ${r.val === null ? "(not yet rated)" : `${r.val}/10`}`),
+    "",
+    `Average: ${avgVal}${vals.length ? "/10" : ""} (${vals.length} of ${rows.length} rated)`,
+  ];
+
+  const blob = new Blob([lines.join("\n")], { type: "text/plain" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = `song-of-the-day-ratings-${pick.date}.txt`;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+}
+
 function getWeekInfo(dateStr) {
   const d = new Date(dateStr + "T00:00:00");
   const day = d.getDay();
@@ -1196,6 +1236,14 @@ export default function App() {
                         ? "unrated"
                         : `★ ${a.toFixed(1)} avg · ${Object.values(p.ratings || {}).filter((r) => r !== null && r !== undefined).length} ratings`}
                     </div>
+                    {pickedToday && p.id === pickedToday.id && (
+                      <button
+                        style={styles.downloadBtn}
+                        onClick={() => downloadDailyAnalytics(p, data.teachers || {})}
+                      >
+                        📊 download today's ratings
+                      </button>
+                    )}
                   </div>
                 );
               })}
@@ -2213,6 +2261,19 @@ const styles = {
     fontWeight: 600,
   },
   avgBadge: { fontSize: 13, fontWeight: 700, color: "#a8492b", marginBottom: 4 },
+  downloadBtn: {
+    display: "block",
+    marginTop: 8,
+    background: "transparent",
+    border: "1px solid rgba(168,73,43,0.4)",
+    color: "#a8492b",
+    borderRadius: 8,
+    padding: "6px 10px",
+    fontSize: 11,
+    fontWeight: 600,
+    cursor: "pointer",
+    width: "100%",
+  },
   footer: {
     textAlign: "center",
     fontSize: 11,
