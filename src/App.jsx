@@ -61,8 +61,6 @@ const FALLBACK_POOL = [
 
 const PICK_GENRE_OPTIONS = [
   "Surprise me",
-  "Classical",
-  "Instrumental",
   "Jazz",
   "Blues",
   "World",
@@ -79,7 +77,6 @@ const PICK_GENRE_OPTIONS = [
   "Rap/Hip-Hop",
   "Electronic",
   "Reggae",
-  "Latin",
 ];
 const REAL_GENRES = PICK_GENRE_OPTIONS.filter((g) => g !== "Surprise me");
 const uid = () => Math.random().toString(36).slice(2, 10);
@@ -142,7 +139,7 @@ export default function App() {
   const [showImport, setShowImport] = useState(false);
   const [importText, setImportText] = useState("");
   const [importMsg, setImportMsg] = useState(null);
-  const [newSong, setNewSong] = useState({ title: "", artist: "", genre: "Instrumental", previewed: false });
+  const [newSong, setNewSong] = useState({ title: "", artist: "", genre: "Jazz", previewed: false });
   const [justPicked, setJustPicked] = useState(null);
   const [picking, setPicking] = useState(false);
   const [pickError, setPickError] = useState(null);
@@ -435,7 +432,7 @@ export default function App() {
     try {
       await claimAndAddPick(today, newId, entry);
       setJustPicked(newId);
-      setNewSong({ title: "", artist: "", genre: "Instrumental", previewed: false });
+      setNewSong({ title: "", artist: "", genre: "Jazz", previewed: false });
       setShowAdd(false);
     } catch (e) {
       if (e.code === "ALREADY_PICKED_TODAY") {
